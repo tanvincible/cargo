@@ -2924,6 +2924,94 @@ impl StringList {
 #[derive(Debug, Deserialize)]
 pub struct UnmergedStringList(Vec<String>);
 
+/// A generic list that handles non-merging fields. This can be used for configuration fields that should **override** rather than merge.
+#[derive(Debug, Deserialize, Clone)]
+pub struct NonMergingList(Vec<String>);
+
+impl NonMergingList {
+    pub fn merge(mut self, other: Self) -> Self {
+        self.0 = other.0;
+        self
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub registries: HashMap<String, RegistryConfig>,
+    pub target: HashMap<String, TargetConfig>,
+    pub host: HostConfig,
+    pub credential_alias: HashMap<String, String>,
+    pub doc: DocConfig,
+
+    pub non_merging_fields: HashSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegistryCredentialConfig {
+    pub credential_provider: Option<NonMergingList>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TargetRunnerConfig {
+    pub runner: Option<NonMergingList>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HostRunnerConfig {
+    pub runner: Option<NonMergingList>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DocBrowserConfig {
+    pub browser: Option<NonMergingList>,
+}
+
+impl MergedConfig {
+    pub fn merge(mut self, other: Config) -> Self {
+        for (key, value) in other.registries {
+            self.registries
+                .entry(key)
+                .and_modify(|e| {
+                    if self.non_merging_fields.contains("registries.custom.credential-provider") {
+                        if let Some(ref other_provider) = value.credential_provider {
+                            e.credential_provider = Some(other_provider.clone());
+                        }
+                    }
+                })
+                .or_insert(value);
+        }
+
+        for (key, value) in other.target {
+            self.target
+                .entry(key)
+                .and_modify(|e| {
+                    if self.non_merging_fields.contains("target.custom.runner") {
+                        if let Some(ref other_runner) = value.runner {
+                            e.runner = Some(other_runner.clone());
+                        }
+                    }
+                })
+                .or_insert(value);
+        }
+
+        if self.non_merging_fields.contains("host.runner") {
+            if let Some(ref other_runner) = other.host.runner {
+                self.host.runner = Some(other_runner.clone());
+            }
+        }
+
+        if self.non_merging_fields.contains("doc.browser") {
+            if let Some(ref other_browser) = other.doc.browser {
+                self.doc.browser = Some(other_browser.clone());
+            }
+        }
+
+        self.credential_alias.extend(other.credential_alias);
+
+        self
+    }
+}
+
 #[macro_export]
 macro_rules! __shell_print {
     ($config:expr, $which:ident, $newline:literal, $($arg:tt)*) => ({
