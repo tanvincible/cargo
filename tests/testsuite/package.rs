@@ -1339,10 +1339,12 @@ fn dirty_file_outside_pkg_root_considered_dirty() {
                 license-file = "../LICENSE"
             "#,
         )
+        .file("original-dir/file", "before")
         .symlink("lib.rs", "isengard/src/lib.rs")
         .symlink("README.md", "isengard/README.md")
         .file(&main_outside_pkg_root, "fn main() {}")
         .symlink(&main_outside_pkg_root, "isengard/src/main.rs")
+        .symlink_dir("original-dir", "isengard/symlink-dir")
     });
     git::commit(&repo);
 
@@ -1352,6 +1354,7 @@ fn dirty_file_outside_pkg_root_considered_dirty() {
     // * Changes in files outside package root that source files symlink to
     p.change_file("README.md", "after");
     p.change_file("lib.rs", "pub fn after() {}");
+    p.change_file("original-dir/file", "after");
     // * Changes in files outside pkg root that `license-file`/`readme` point to
     p.change_file("LICENSE", "after");
     // * When workspace inheritance is involved and changed
@@ -1375,10 +1378,12 @@ fn dirty_file_outside_pkg_root_considered_dirty() {
     p.cargo("package --workspace --no-verify")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[ERROR] 2 files in the working directory contain changes that were not yet committed into git:
+[ERROR] 4 files in the working directory contain changes that were not yet committed into git:
 
 LICENSE
 README.md
+lib.rs
+original-dir/file
 
 to proceed despite this and include the uncommitted changes, pass the `--allow-dirty` flag
 
@@ -1388,7 +1393,7 @@ to proceed despite this and include the uncommitted changes, pass the `--allow-d
     p.cargo("package --workspace --no-verify --allow-dirty")
         .with_stderr_data(str![[r#"
 [PACKAGING] isengard v0.0.0 ([ROOT]/foo/isengard)
-[PACKAGED] 8 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[PACKAGED] 9 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
 
 "#]])
         .run();
@@ -1411,6 +1416,7 @@ edition = "2021"
             "Cargo.toml.orig",
             "src/lib.rs",
             "src/main.rs",
+            "symlink-dir/file",
             "Cargo.lock",
             "LICENSE",
             "README.md",
@@ -1418,6 +1424,7 @@ edition = "2021"
         [
             ("src/lib.rs", str!["pub fn after() {}"]),
             ("src/main.rs", str![r#"fn main() { eprintln!("after"); }"#]),
+            ("symlink-dir/file", str!["after"]),
             ("README.md", str!["after"]),
             ("LICENSE", str!["after"]),
             ("Cargo.toml", cargo_toml),
@@ -7024,4 +7031,90 @@ src/main.rs
 
 "#]])
         .run();
+}
+
+#[cargo_test]
+fn git_core_symlinks_false() {
+    if !symlink_supported() {
+        return;
+    }
+
+    let git_project = git::new("bar", |p| {
+        p.file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                description = "bar"
+                license = "MIT"
+                edition = "2021"
+                documentation = "foo"
+            "#,
+        )
+        .file("src/lib.rs", "//! This is a module")
+        .symlink("src/lib.rs", "symlink-lib.rs")
+        .symlink_dir("src", "symlink-dir")
+    });
+
+    let url = git_project.root().to_url().to_string();
+
+    let p = project().build();
+    let root = p.root();
+    // Remove the default project layout,
+    // so we can git-fetch from git_project under the same directory
+    fs::remove_dir_all(&root).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let repo = git::init(&root);
+
+    let mut cfg = repo.config().unwrap();
+    cfg.set_bool("core.symlinks", false).unwrap();
+
+    // let's fetch from git_project so it respects our core.symlinks=false config.
+    repo.remote_anonymous(&url)
+        .unwrap()
+        .fetch(&["HEAD"], None, None)
+        .unwrap();
+    let rev = repo
+        .find_reference("FETCH_HEAD")
+        .unwrap()
+        .peel_to_commit()
+        .unwrap();
+    repo.reset(rev.as_object(), git2::ResetType::Hard, None)
+        .unwrap();
+
+    p.cargo("package --allow-dirty")
+        .with_stderr_data(str![[r#"
+[WARNING] found symbolic links that may be checked out as regular files for git repo at `[ROOT]/foo/`
+This might cause the `.crate` file to include incorrect or incomplete files
+[NOTE] to avoid this, set the Git config `core.symlinks` to `true`
+...
+[PACKAGING] bar v0.0.0 ([ROOT]/foo)
+[PACKAGED] 7 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] bar v0.0.0 ([ROOT]/foo)
+[COMPILING] bar v0.0.0 ([ROOT]/foo/target/package/bar-0.0.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+
+    let f = File::open(&p.root().join("target/package/bar-0.0.0.crate")).unwrap();
+    validate_crate_contents(
+        f,
+        "bar-0.0.0.crate",
+        &[
+            "Cargo.lock",
+            "Cargo.toml",
+            "Cargo.toml.orig",
+            "src/lib.rs",
+            // We're missing symlink-dir/lib.rs in the `.crate` file.
+            "symlink-dir",
+            "symlink-lib.rs",
+            ".cargo_vcs_info.json",
+        ],
+        [
+            // And their contents are incorrect.
+            ("symlink-dir", str!["[ROOT]/bar/src"]),
+            ("symlink-lib.rs", str!["[ROOT]/bar/src/lib.rs"]),
+        ],
+    );
 }
