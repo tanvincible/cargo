@@ -2916,7 +2916,7 @@ impl StringList {
     }
 }
 
-/// A generic list that handles non-merging fields. It used for configuration fields that should **override** rather than merge.
+/// A generic list that handles non-merging fields. It is used for configuration fields that should override rather than merge.
 #[derive(Debug, Deserialize, Clone)]
 pub struct NonMergingList(Vec<String>);
 
